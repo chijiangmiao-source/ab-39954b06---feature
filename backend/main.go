@@ -43,6 +43,8 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	r.POST("/api/audit", handleAudit)
+	// 最小遮挡反证复核：重新解析原图并重跑精确配准，与 /api/audit 相互独立。
+	r.POST("/api/counter-evidence", handleCounterEvidence)
 
 	srv := &http.Server{
 		Addr:              ":" + port,

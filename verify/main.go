@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -168,6 +169,324 @@ type auditResp struct {
 		RecheckOut    int      `json:"recheckOutOfCanvas"`
 	} `json:"overlay"`
 	ElapsedMs int64 `json:"elapsedMs"`
+}
+
+// ---------- 最小遮挡反证复核结构 ----------
+
+type counterResp struct {
+	N         int  `json:"n"`
+	Feasible  bool `json:"feasible"`
+	Canonical struct {
+		PoseIndex int    `json:"poseIndex"`
+		Pose      string `json:"pose"`
+		PoseLabel string `json:"poseLabel"`
+		Dy        int    `json:"dy"`
+		Dx        int    `json:"dx"`
+		Overlap   int    `json:"overlap"`
+	} `json:"canonical"`
+	Target struct {
+		PoseIndex int    `json:"poseIndex"`
+		Pose      string `json:"pose"`
+		PoseLabel string `json:"poseLabel"`
+		Dy        int    `json:"dy"`
+		Dx        int    `json:"dx"`
+		Overlap   int    `json:"overlap"`
+	} `json:"target"`
+	Gap    int `json:"gap"`
+	Window *struct {
+		Top              int      `json:"top"`
+		Left             int      `json:"left"`
+		Bottom           int      `json:"bottom"`
+		Right            int      `json:"right"`
+		Width            int      `json:"width"`
+		Height           int      `json:"height"`
+		Area             int      `json:"area"`
+		RemovedCanonical int      `json:"removedCanonical"`
+		RemovedTarget    int      `json:"removedTarget"`
+		RemovedPoints    [][2]int `json:"removedPoints"`
+		CanonicalAfter   int      `json:"canonicalOverlapAfter"`
+		TargetAfter      int      `json:"targetOverlapAfter"`
+	} `json:"window"`
+}
+
+func postCounter(base, refText, recText string, pose, dy, dx int) (int, []byte, error) {
+	body, _ := json.Marshal(map[string]interface{}{
+		"reference": refText, "recheck": recText,
+		"targetPose": pose, "targetDy": dy, "targetDx": dx,
+	})
+	resp, err := client.Post(base+"/api/counter-evidence", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, data, err
+}
+
+// hitSet 返回某候选（姿态 p、平移 dy,dx）命中的参考缺陷坐标集合。
+func hitSet(ref, rec grid, n, p, dy, dx int) map[[2]int]bool {
+	hit := map[[2]int]bool{}
+	for r := 0; r < n; r++ {
+		for c := 0; c < n; c++ {
+			if rec[r][c] == 0 {
+				continue
+			}
+			pr, pc := applyPose(p, r, c, n)
+			tr, tc := pr+dy, pc+dx
+			if tr >= 0 && tr < n && tc >= 0 && tc < n && ref[tr][tc] != 0 {
+				hit[[2]int{tr, tc}] = true
+			}
+		}
+	}
+	return hit
+}
+
+// bruteMinWindow 独立暴力参照：枚举全部轴对齐非空矩形，
+// 找权值和 >= threshold 的最小面积窗口，同面积按 (上,左,下,右) 裁决。
+func bruteMinWindow(weights []int, n, threshold int) ([4]int, bool) {
+	best, found := [4]int{}, false
+	bestArea := 0
+	for t := 0; t < n; t++ {
+		for b := t; b < n; b++ {
+			for l := 0; l < n; l++ {
+				sum := 0
+				for r := l; r < n; r++ {
+					for i := t; i <= b; i++ {
+						sum += weights[i*n+r]
+					}
+					if sum >= threshold {
+						cand := [4]int{t, l, b, r}
+						area := (b - t + 1) * (r - l + 1)
+						earlier := func() bool {
+							for k := 0; k < 4; k++ {
+								if cand[k] != best[k] {
+									return cand[k] < best[k]
+								}
+							}
+							return false
+						}
+						if !found || area < bestArea || (area == bestArea && earlier()) {
+							found, bestArea, best = true, area, cand
+						}
+					}
+				}
+			}
+		}
+	}
+	return best, found
+}
+
+// buildCounterWeights 按定义重建每个参考缺陷的命中差 (-1/0/1) 网格。
+func buildCounterWeights(ref, rec grid, n, cp, cdy, cdx, tp, tdy, tdx int) ([]int, map[[2]int]bool, map[[2]int]bool) {
+	cHit := hitSet(ref, rec, n, cp, cdy, cdx)
+	tHit := hitSet(ref, rec, n, tp, tdy, tdx)
+	w := make([]int, n*n)
+	for r := 0; r < n; r++ {
+		for c := 0; c < n; c++ {
+			if ref[r][c] == 0 {
+				continue
+			}
+			k := [2]int{r, c}
+			v := 0
+			if cHit[k] {
+				v++
+			}
+			if tHit[k] {
+				v--
+			}
+			w[r*n+c] = v
+		}
+	}
+	return w, cHit, tHit
+}
+
+// counterFixtures 与后端单测构造一致：
+// 共享命中 3 点（权 0）、规范独占 3 点（权 +1）、目标独占 2 点（权 -1）。
+func counterFixtures() (grid, grid) {
+	const n = 16
+	ref, rec := newGrid(n), newGrid(n)
+	for _, p := range [][2]int{{3, 3}, {3, 7}, {3, 11}} {
+		ref[p[0]][p[1]] = 1
+		rec[p[0]][p[1]] = 1
+		rec[p[0]-1][p[1]] = 1
+	}
+	for _, p := range [][2]int{{10, 4}, {10, 5}, {10, 6}} {
+		ref[p[0]][p[1]] = 1
+		rec[p[0]-1][p[1]] = 1
+	}
+	for _, p := range [][2]int{{14, 1}, {14, 15}} {
+		ref[p[0]][p[1]] = 1
+		rec[p[0]][p[1]] = 1
+	}
+	return ref, rec
+}
+
+func caseCounterFalsifiable(base string) {
+	const n = 16
+	ref, rec := counterFixtures()
+	// 经前端 nginx 代理从真实页面同源入口提交（目标候选 identity/(0,0)）。
+	status, body, err := postCounter(base, gridToText(ref), gridToText(rec), 0, 0, 0)
+	if err != nil {
+		check("反证复核·可反证案例", false, err.Error())
+		return
+	}
+	var resp counterResp
+	if err := json.Unmarshal(body, &resp); err != nil || status != 200 {
+		check("反证复核·可反证案例", false, fmt.Sprintf("status=%d body=%s", status, body))
+		return
+	}
+	// 规范候选必须由服务端重算，且与本地暴力穷举一致。
+	e := bruteForce(ref, rec, n)
+	canOK := resp.Canonical.PoseIndex == e.pose && resp.Canonical.Dy == e.dy &&
+		resp.Canonical.Dx == e.dx && resp.Canonical.Overlap == e.max && e.max == 6
+	check("反证复核·服务端重新配准规范候选(identity,dy=1,6 命中)", canOK,
+		fmt.Sprintf("canonical=%+v want=%+v", resp.Canonical, e))
+	check("反证复核·目标候选 5 命中、gap=1",
+		resp.Target.PoseIndex == 0 && resp.Target.Dy == 0 && resp.Target.Dx == 0 &&
+			resp.Target.Overlap == 5 && resp.Gap == 1,
+		fmt.Sprintf("target=%+v gap=%d", resp.Target, resp.Gap))
+
+	// 独立按定义重建权值网格并暴力枚举最小窗口。
+	weights, cHit, tHit := buildCounterWeights(ref, rec, n,
+		e.pose, e.dy, e.dx, 0, 0, 0)
+	wantWin, found := bruteMinWindow(weights, n, resp.Gap+1)
+	ok := resp.Feasible && found && resp.Window != nil
+	if ok {
+		got := [4]int{resp.Window.Top, resp.Window.Left, resp.Window.Bottom, resp.Window.Right}
+		ok = got == wantWin && wantWin == [4]int{10, 4, 10, 5} &&
+			resp.Window.Area == 2 &&
+			resp.Window.CanonicalAfter == 4 && resp.Window.TargetAfter == 5 &&
+			resp.Window.TargetAfter > resp.Window.CanonicalAfter
+		// 窗内移除点数与命中分类独立核对。
+		remC, remT := 0, 0
+		for _, p := range resp.Window.RemovedPoints {
+			if cHit[p] {
+				remC++
+			}
+			if tHit[p] {
+				remT++
+			}
+		}
+		ok = ok && len(resp.Window.RemovedPoints) == 2 &&
+			remC == resp.Window.RemovedCanonical && remC == 2 &&
+			remT == resp.Window.RemovedTarget && remT == 0
+		check("反证复核·可反证案例（最小窗口 1×2@(10,4)，移除后 5>4）", ok,
+			fmt.Sprintf("got=%v want=%v win=%+v", got, wantWin, resp.Window))
+	} else {
+		check("反证复核·可反证案例（最小窗口 1×2@(10,4)，移除后 5>4）", false,
+			fmt.Sprintf("feasible=%v found=%v window=%+v", resp.Feasible, found, resp.Window))
+	}
+}
+
+func caseCounterNonFalsifiable(base string) {
+	const n = 16
+	ref, rec := newGrid(n), newGrid(n)
+	pts := [][2]int{
+		{2, 3}, {3, 9}, {4, 4}, {5, 12}, {6, 7}, {7, 11},
+		{8, 5}, {9, 10}, {10, 13}, {11, 2}, {12, 8}, {13, 6},
+	}
+	for _, p := range pts {
+		ref[p[0]][p[1]] = 1
+		rec[p[0]-1][p[1]] = 1 // 仅规范候选 dy=+1 命中
+	}
+	status, body, err := postCounter(base, gridToText(ref), gridToText(rec), 0, 0, 0)
+	if err != nil {
+		check("反证复核·不可反证案例", false, err.Error())
+		return
+	}
+	var resp counterResp
+	if err := json.Unmarshal(body, &resp); err != nil || status != 200 {
+		check("反证复核·不可反证案例", false, fmt.Sprintf("status=%d body=%s", status, body))
+		return
+	}
+	e := bruteForce(ref, rec, n)
+	weights, _, _ := buildCounterWeights(ref, rec, n, e.pose, e.dy, e.dx, 0, 0, 0)
+	_, found := bruteMinWindow(weights, n, resp.Gap+1)
+	check("反证复核·不可反证案例（无窗口且不伪造矩形，规范 12:0）",
+		!resp.Feasible && resp.Window == nil && !found &&
+			resp.Canonical.Overlap == 12 && resp.Target.Overlap == 0 && resp.Gap == 12,
+		fmt.Sprintf("feasible=%v win=%+v found=%v", resp.Feasible, resp.Window, found))
+}
+
+func caseCounterValidation(base string) {
+	const n = 16
+	ref, rec := counterFixtures()
+	refText, recText := gridToText(ref), gridToText(rec)
+	decodeErr := func(body []byte) apiErr {
+		var v struct {
+			E apiErr `json:"error"`
+		}
+		json.Unmarshal(body, &v)
+		return v.E
+	}
+
+	status, body, _ := postCounter(base, refText, recText, 8, 0, 0)
+	e1 := decodeErr(body)
+	check("反证复核·姿态越界 400 并定位字段", status == 400 && e1.Field == "targetPose",
+		fmt.Sprintf("status=%d body=%s", status, body))
+
+	status, body, _ = postCounter(base, refText, recText, 0, n, 0)
+	e2 := decodeErr(body)
+	check("反证复核·纵移越界 400 并定位字段", status == 400 && e2.Field == "targetDy",
+		fmt.Sprintf("status=%d body=%s", status, body))
+
+	status, body, _ = postCounter(base, refText, recText, 0, 0, -n)
+	e3 := decodeErr(body)
+	check("反证复核·横移越界 400 并定位字段", status == 400 && e3.Field == "targetDx",
+		fmt.Sprintf("status=%d body=%s", status, body))
+
+	// 边长 97：反证入口拒绝（仅 16..96）。
+	big := gridToText(newGrid(97))
+	status, body, _ = postCounter(base, big, big, 0, 0, 0)
+	e4 := decodeErr(body)
+	check("反证复核·边长 97 被拒绝(仅支持 16..96)", status == 400 && e4.Field == "reference",
+		fmt.Sprintf("status=%d body=%s", status, body))
+
+	// 目标候选与规范候选相同。
+	status, body, _ = postCounter(base, refText, recText, 0, 1, 0)
+	e5 := decodeErr(body)
+	check("反证复核·目标候选同规范候选被拒绝", status == 400 && e5.Field == "targetPose",
+		fmt.Sprintf("status=%d body=%s", status, body))
+
+	// 原图非法字符同样重新解析并定位行列。
+	lines := strings.Split(recText, "\n")
+	row := []byte(lines[1])
+	row[2] = 'x'
+	lines[1] = string(row)
+	status, body, _ = postCounter(base, refText, strings.Join(lines, "\n"), 0, 0, 0)
+	e6 := decodeErr(body)
+	check("反证复核·重新解析原图并定位非法字符", status == 400 && e6.Field == "recheck" &&
+		e6.Line == 2 && e6.Column == 3,
+		fmt.Sprintf("status=%d body=%s", status, body))
+}
+
+func caseCounterServedByRealPage(base string) {
+	// 真实页面必须已经挂载反证复核入口，且打包产物里包含对应调用。
+	resp, err := client.Get(base + "/")
+	if err != nil {
+		check("反证复核·真实页面已挂载复核入口", false, err.Error())
+		return
+	}
+	indexBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	indexHTML := string(indexBytes)
+	rootOK := resp.StatusCode == 200 && strings.Contains(indexHTML, `id="root"`)
+
+	re := regexp.MustCompile(`/assets/[^"']+\.js`)
+	asset := re.FindString(indexHTML)
+	bundleHas := false
+	if asset != "" {
+		jsResp, err := client.Get(base + asset)
+		if err == nil {
+			b, _ := io.ReadAll(jsResp.Body)
+			jsResp.Body.Close()
+			s := string(b)
+			bundleHas = strings.Contains(s, "最小遮挡反证复核") &&
+				strings.Contains(s, "/api/counter-evidence")
+		}
+	}
+	check("反证复核·真实页面已挂载复核入口", rootOK && asset != "" && bundleHas,
+		fmt.Sprintf("root=%v asset=%q bundleHasEntry=%v", rootOK, asset, bundleHas))
 }
 
 func postAudit(base, refText, recText string) (int, []byte, error) {
@@ -486,6 +805,12 @@ func main() {
 	caseDenseAllOnes(frontendURL, 64)
 	caseDenseAllOnes(frontendURL, 512)
 	caseValidation(frontendURL)
+
+	// 最小遮挡负权矩形反证复核：真实页面同源入口的端到端用例
+	caseCounterServedByRealPage(frontendURL)
+	caseCounterFalsifiable(frontendURL)
+	caseCounterNonFalsifiable(frontendURL)
+	caseCounterValidation(frontendURL)
 
 	// 直连后端，排除代理因素
 	caseIdentityDirect(backendURL)

@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react'
 
 // 红蓝叠加证据图：参考图缺陷画蓝色，规范变换后的复检图缺陷画半透明红色，
 // 重合处自然叠成紫色；复检图中被移出画布的点绘制在画布边界外的扩展区域。
-export default function OverlayCanvas({ n, overlay }) {
+// 可选 counterWindow：把最小遮挡反证窗口以琥珀色描边叠在同一叠图上。
+export default function OverlayCanvas({ n, overlay, counterWindow }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -85,7 +86,22 @@ export default function OverlayCanvas({ n, overlay }) {
     ctx.strokeStyle = '#0f172a'
     ctx.lineWidth = 2
     ctx.strokeRect(-minC * cell + 1, -minR * cell + 1, n * cell - 2, n * cell - 2)
-  }, [n, overlay])
+
+    // 最小遮挡反证窗口（琥珀色描边 + 半透明填充），叠在红蓝缺陷之上。
+    if (counterWindow) {
+      const { top, left, bottom, right } = counterWindow
+      const [x, y] = px(top, left)
+      const w = (right - left + 1) * cell
+      const h = (bottom - top + 1) * cell
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.22)'
+      ctx.fillRect(x, y, w, h)
+      ctx.strokeStyle = '#d97706'
+      ctx.lineWidth = 2
+      ctx.setLineDash(cell >= 6 ? [5, 3] : [])
+      ctx.strokeRect(x + 1, y + 1, w - 2, h - 2)
+      ctx.setLineDash([])
+    }
+  }, [n, overlay, counterWindow])
 
   return <canvas ref={ref} className="overlay-canvas" />
 }

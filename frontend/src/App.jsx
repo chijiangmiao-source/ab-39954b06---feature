@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { fetchHealth, postAudit } from './api'
 import OverlayCanvas from './OverlayCanvas'
+import CounterReview from './CounterReview'
 import { makeRandom, makeSample } from './sample'
 
 const FIELD_LABEL = { reference: '参考图', recheck: '复检图' }
@@ -13,6 +14,10 @@ export default function App() {
   const [refText, setRefText] = useState('')
   const [recText, setRecText] = useState('')
   const [result, setResult] = useState(null)
+  const [counterEvidence, setCounterEvidence] = useState(null)
+  // 已展示审计结论对应的原始文本快照：复核必须基于同一批原图，
+  // 不随审计后再次编辑输入框而变化。
+  const [auditInputs, setAuditInputs] = useState({ reference: '', recheck: '' })
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
   const [health, setHealth] = useState('checking') // checking | ok | down
@@ -37,9 +42,11 @@ export default function App() {
     setLoading(true)
     setError(null)
     setResult(null) // 新请求发出即清空旧结论，异常时绝不残留
+    setCounterEvidence(null) // 同步清空旧复核证据，避免与新叠图错配
     try {
       const data = await postAudit(refText, recText)
       setResult(data)
+      setAuditInputs({ reference: refText, recheck: recText })
     } catch (err) {
       setError({
         field: err.field || '',
@@ -57,6 +64,8 @@ export default function App() {
     setRefText(s.reference)
     setRecText(s.recheck)
     setError(null)
+    setResult(null)
+    setCounterEvidence(null)
   }
 
   const loadRandom = () => {
@@ -64,6 +73,8 @@ export default function App() {
     setRefText(s.reference)
     setRecText(s.recheck)
     setError(null)
+    setResult(null)
+    setCounterEvidence(null)
   }
 
   const clearAll = () => {
@@ -71,6 +82,7 @@ export default function App() {
     setRecText('')
     setError(null)
     setResult(null)
+    setCounterEvidence(null)
   }
 
   return (
@@ -170,15 +182,30 @@ export default function App() {
             </p>
           </div>
 
-          <div className="overlay-card">
-            <h3>红蓝叠加证据</h3>
-            <OverlayCanvas n={result.n} overlay={result.overlay} />
-            <div className="legend">
-              <span><i className="sw sw-blue" />参考图缺陷（{result.overlay.matched.length + result.overlay.referenceOnly.length}）</span>
-              <span><i className="sw sw-red" />复检图变换后（{result.overlay.matched.length + result.overlay.recheckOnly.length}）</span>
-              <span><i className="sw sw-purple" />重合（{result.overlay.matched.length}）</span>
-              <span><i className="sw sw-gray" />画布外扩展区域</span>
+          <div className="counter-layout">
+            <div className="overlay-card">
+              <h3>红蓝叠加证据</h3>
+              <OverlayCanvas
+                n={result.n}
+                overlay={result.overlay}
+                counterWindow={counterEvidence && counterEvidence.feasible ? counterEvidence.window : null}
+              />
+              <div className="legend">
+                <span><i className="sw sw-blue" />参考图缺陷（{result.overlay.matched.length + result.overlay.referenceOnly.length}）</span>
+                <span><i className="sw sw-red" />复检图变换后（{result.overlay.matched.length + result.overlay.recheckOnly.length}）</span>
+                <span><i className="sw sw-purple" />重合（{result.overlay.matched.length}）</span>
+                <span><i className="sw sw-gray" />画布外扩展区域</span>
+                <span><i className="sw sw-amber" />反证窗口</span>
+              </div>
             </div>
+
+            <CounterReview
+              n={result.n}
+              reference={auditInputs.reference}
+              recheck={auditInputs.recheck}
+              evidence={counterEvidence}
+              onEvidenceChange={setCounterEvidence}
+            />
           </div>
 
           <details className="raw">
