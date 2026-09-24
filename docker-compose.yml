@@ -1,0 +1,47 @@
+name: wafer-audit
+
+services:
+  backend:
+    build: ./backend
+    image: wafer-audit-backend
+    environment:
+      PORT: 8080
+      GIN_MODE: release
+    ports:
+      # 宿主机端口可通过 BACKEND_PORT 覆盖
+      - "${BACKEND_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  frontend:
+    build: ./frontend
+    image: wafer-audit-frontend
+    ports:
+      # 宿主机端口可通过 FRONTEND_PORT 覆盖
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  verify:
+    build: ./verify
+    image: wafer-audit-verify
+    environment:
+      BACKEND_URL: http://backend:8080
+      FRONTEND_URL: http://frontend:80
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    restart: "no"
