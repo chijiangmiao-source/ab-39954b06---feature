@@ -2,7 +2,10 @@ import { useEffect, useRef } from 'react'
 
 // 红蓝叠加证据图：参考图缺陷画蓝色，规范变换后的复检图缺陷画半透明红色，
 // 重合处自然叠成紫色；复检图中被移出画布的点绘制在画布边界外的扩展区域。
-export default function OverlayCanvas({ n, overlay }) {
+//
+// 可选 windowRect：最小遮挡反证复核求得的可行窗口（画布内格子坐标，含端点），
+// 以半透明绿色填充 + 粗描边绘制；removed 中的被移除参考缺陷加金色描边。
+export default function OverlayCanvas({ n, overlay, windowRect, removed }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -10,7 +13,7 @@ export default function OverlayCanvas({ n, overlay }) {
     if (!canvas) return
     const { matched, referenceOnly, recheckOnly } = overlay
 
-    // 视野 = 原画布 ∪ 复检变换后所有点的包围盒
+    // 视野 = 原画布 ∪ 复检变换后所有点的包围盒（反证窗口恒在原画布内）
     let minR = 0
     let minC = 0
     let maxR = n - 1
@@ -81,11 +84,33 @@ export default function OverlayCanvas({ n, overlay }) {
     }
     ctx.globalAlpha = 1
 
+    // 最小遮挡反证窗口：半透明绿底 + 粗描边（先于原画布边界绘制，边界仍清晰）
+    if (windowRect) {
+      const [x, y] = px(windowRect.top, windowRect.left)
+      const w = (windowRect.right - windowRect.left + 1) * cell
+      const h = (windowRect.bottom - windowRect.top + 1) * cell
+      ctx.fillStyle = 'rgba(21, 128, 61, 0.18)'
+      ctx.fillRect(x, y, w, h)
+      ctx.strokeStyle = '#15803d'
+      ctx.lineWidth = Math.max(2, Math.round(cell / 4))
+      ctx.strokeRect(x + 1, y + 1, w - 2, h - 2)
+
+      // 被移除的参考缺陷：金色描边
+      if (removed && removed.length) {
+        ctx.strokeStyle = '#d97706'
+        ctx.lineWidth = Math.max(1.5, Math.round(cell / 6))
+        for (const [r, c] of removed) {
+          const [rx, ry] = px(r, c)
+          ctx.strokeRect(rx + 1, ry + 1, cell - 2, cell - 2)
+        }
+      }
+    }
+
     // 原画布边界
     ctx.strokeStyle = '#0f172a'
     ctx.lineWidth = 2
     ctx.strokeRect(-minC * cell + 1, -minR * cell + 1, n * cell - 2, n * cell - 2)
-  }, [n, overlay])
+  }, [n, overlay, windowRect, removed])
 
   return <canvas ref={ref} className="overlay-canvas" />
 }

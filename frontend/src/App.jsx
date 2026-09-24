@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { fetchHealth, postAudit } from './api'
 import OverlayCanvas from './OverlayCanvas'
+import RefutePanel from './RefutePanel'
 import { makeRandom, makeSample } from './sample'
 
 const FIELD_LABEL = { reference: '参考图', recheck: '复检图' }
